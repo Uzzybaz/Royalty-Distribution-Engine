@@ -12,12 +12,15 @@
 (define-constant ERR-INSUFFICIENT-BALANCE (err u104))
 (define-constant ERR-NO-COLLABORATORS (err u105))
 (define-constant ERR-INVALID-AMOUNT (err u106))
+(define-constant ERR-NO-PENDING-ROYALTIES (err u107))
+(define-constant ERR-TRANSFER-FAILED (err u108))
 (define-constant MAX-PERCENTAGE u10000)
 
 ;; data vars
 (define-data-var contract-paused bool false)
 (define-data-var total-songs-registered uint u0)
 (define-data-var total-royalties-distributed uint u0)
+(define-data-var total-royalties-withdrawn uint u0)
 
 ;; data maps
 (define-map songs 
@@ -36,7 +39,8 @@
   { 
     role: (string-ascii 20),
     percentage: uint,
-    total-earned: uint
+    total-earned: uint,
+    total-withdrawn: uint
   }
 )
 
@@ -176,6 +180,27 @@
   )
 )
 
+(define-public (withdraw-royalties (song-id uint))
+  (let 
+    (
+      (collaborator-data (unwrap! (map-get? collaborators { song-id: song-id, collaborator: tx-sender }) ERR-SONG-NOT-FOUND))
+      (pending-amount (- (get total-earned collaborator-data) (get total-withdrawn collaborator-data)))
+    )
+    (asserts! (> pending-amount u0) ERR-NO-PENDING-ROYALTIES)
+    (asserts! (not (var-get contract-paused)) ERR-UNAUTHORIZED)
+    
+    (unwrap! (stx-transfer? pending-amount (as-contract tx-sender) tx-sender) ERR-TRANSFER-FAILED)
+    
+    (map-set collaborators
+      { song-id: song-id, collaborator: tx-sender }
+      (merge collaborator-data { total-withdrawn: (get total-earned collaborator-data) })
+    )
+    
+    (var-set total-royalties-withdrawn (+ (var-get total-royalties-withdrawn) pending-amount))
+    (ok pending-amount)
+  )
+)
+
 ;; read-only functions
 
 (define-read-only (get-song-info (song-id uint))
@@ -190,6 +215,7 @@
   {
     total-songs: (var-get total-songs-registered),
     total-royalties: (var-get total-royalties-distributed),
+    total-withdrawn: (var-get total-royalties-withdrawn),
     is-paused: (var-get contract-paused),
     owner: CONTRACT-OWNER
   }
@@ -222,6 +248,13 @@
   (default-to { count: u0 } (map-get? song-collaborator-count { song-id: song-id }))
 )
 
+(define-read-only (get-pending-royalties (song-id uint) (collaborator principal))
+  (match (map-get? collaborators { song-id: song-id, collaborator: collaborator })
+    collab-data (ok (- (get total-earned collab-data) (get total-withdrawn collab-data)))
+    ERR-SONG-NOT-FOUND
+  )
+)
+
 ;; private functions
 
 (define-private (calculate-total-percentage (collaborator-data { collaborator: principal, role: (string-ascii 20), percentage: uint }) (acc uint))
@@ -235,7 +268,8 @@
       { 
         role: (get role collaborator-data),
         percentage: (get percentage collaborator-data),
-        total-earned: u0
+        total-earned: u0,
+        total-withdrawn: u0
       }
     )
     song-id
